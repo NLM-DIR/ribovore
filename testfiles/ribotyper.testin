@@ -28,3 +28,20 @@ desc: ribotyper-i1-16
 out: itest-16/itest-16.ribotyper.short.out
 exp: @RIBOSCRIPTSDIR@/testfiles/expected-files/test-16.ribotyper.short.out
 rmdir: itest-16
+# *DuplicateRegion filter: in NC_021406 the two overlapping hits are no more similar than
+# chance, so the alert is removed and the sequence PASSes; in NC_013821 they are, so the
+# alert is kept (FATAL). With --nodupfilter both alerts are reported and both FAIL.
+command: cp $RIBOSCRIPTSDIR/testfiles/dupfilter-2.fa ./; perl $RIBOSCRIPTSDIR/ribotyper -f dupfilter-2.fa test-df2 > /dev/null;
+desc: ribotyper-dupfilter-2
+out: test-df2/test-df2.ribotyper.short.out
+out: test-df2/test-df2.ribotyper.long.out
+exp: @RIBOSCRIPTSDIR@/testfiles/expected-files/test-df2.ribotyper.short.out
+exp: @RIBOSCRIPTSDIR@/testfiles/expected-files/test-df2.ribotyper.long.out
+rmdir: test-df2
+command: cp $RIBOSCRIPTSDIR/testfiles/dupfilter-2.fa ./; perl $RIBOSCRIPTSDIR/ribotyper --nodupfilter -f dupfilter-2.fa test-nodf2 > /dev/null;
+desc: ribotyper-nodupfilter-2
+out: test-nodf2/test-nodf2.ribotyper.short.out
+out: test-nodf2/test-nodf2.ribotyper.long.out
+exp: @RIBOSCRIPTSDIR@/testfiles/expected-files/test-nodf2.ribotyper.short.out
+exp: @RIBOSCRIPTSDIR@/testfiles/expected-files/test-nodf2.ribotyper.long.out
+rmdir: test-nodf2

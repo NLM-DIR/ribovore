@@ -24,6 +24,7 @@ fi
 
 for test in \
     01-iss2-modelname-parantheses.t \
+    02-dupfilter-install-errors.t \
 ; do
     if [ $do_teamcity == 1 ]; then
         echo "##teamcity[testStarted name=\"$test\" captureStandardOutput='true']"

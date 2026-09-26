@@ -1,0 +1,49 @@
+#idx  target     classification                    strnd   p/f  unexpected_features
+#---  ---------  --------------------------------  -----  ----  -------------------
+1     NC_021406  LSU.Mito-Bilateria                plus   PASS  LowScore:(0.18<0.50);LowCoverage:(0.838<0.860);MultipleHits:(2:SI[M:-166(451..616),S:90(748..837)]);LowScoreDifference:(0.041<0.100_bits_per_posn);
+2     NC_013821  LSU.Mito-Nematoda                 plus   FAIL  *DuplicateRegion:(451-471)_hits_1_and_2(M:451.954,37.471,S:441.945,2.440);MultipleHits:(2:SI[M:-21(451..471),S:0(440..441)]);
+#
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+# Explanation of columns:
+#
+# Column 1 [idx]:                 index of sequence in input sequence file
+# Column 2 [target]:              name of target sequence
+# Column 3 [classification]:      classification of sequence
+# Column 4 [strnd]:               strand ('plus' or 'minus') of best-scoring hit
+# Column 5 [p/f]:                 PASS or FAIL (reasons for failure begin with '*' in rightmost column)
+# Column 6 [unexpected_features]: unexpected/unusual features of sequence (see below)
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+#
+# Explanation of possible values in unexpected_features column:
+#
+# This column will include a '-' if none of the features listed below are detected.
+# Or it will contain one or more of the following types of messages. There are no
+# whitespaces in this field, to make parsing easier.
+#
+# Values that begin with "*" automatically cause a sequence to FAIL.
+# Values that do not begin with "*" do not cause a sequence to FAIL.
+#
+#  1.  *NoHits                 No primary hits to any models above the minimum primary score
+#                              threshold of 20 bits (--minpsc) were found.
+#  2.  *MultipleFamilies       One or more primary hits to two or more "families" (e.g. SSU
+#                              or LSU) exists for the same sequence.
+#  3.  *BothStrands            One or more primary hits above the minimum primary score threshold
+#                              of 20 bits (--minpsc) were found on each strand.
+#  4.  *DuplicateRegion        At least two hits (primary or secondary) on the same strand overlap
+#                              in model coordinates by 20 (--maxoverlap) positions or more
+#  5.  *InconsistentHits       Not all hits (primary or secondary) are in the same order in the
+#                              sequence and in the model.
+#  6.  MinusStrand             Best hit is on the minus strand.
+#  7.  LowScore                The bits per nucleotide (total bit score divided by total length
+#                              of sequence) is below threshold of 0.5 (--lowppossc).
+#  8.  LowCoverage             The total coverage of all hits (primary and secondary) to the best
+#                              model (summed length of all hits divided by total length of sequence)
+#                              is below threshold of 0.86 (--tcov).
+#  9.  LowScoreDifference      The difference between the top two domains is below the 'low'
+#                              threshold of 0.10 (--lowpdiff) bits per position (total bit score
+#                              divided by summed length of all hits).
+# 10.  VeryLowScoreDifference  The difference between the top two domains is below the 'very low'
+#                              threshold of 0.04 (--vlowpdiff) bits per position (total bit score
+#                              divided by summed length of all hits).
+# 11.  MultipleHits            There is more than one hit to the best scoring model on the same strand.
+#
