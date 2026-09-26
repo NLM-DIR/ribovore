@@ -24,6 +24,20 @@ $execs_H{"esl-seqstat"} = $env_riboeasel_dir    . "/esl-seqstat";
 $execs_H{"esl-sfetch"}  = $env_riboeasel_dir    . "/esl-sfetch";
 # we'll check for blastn below after we find out if we need it (if --1blast)
 
+# state for the *DuplicateRegion filter (on unless --nodupfilter);
+# file-scoped so output_one_target() can reach it without changing its arguments
+my $do_dupfilter          = 0;     # set to '1' below only if the filter is on AND adjudication is possible
+my $dupfilter_off_reason  = undef; # if the filter is on but the options used rule out adjudication: why
+                                   # (recorded in log and .dupfilter.tsv; installation problems are fatal errors instead)
+my %dupfilter_hit_HA      = ();    # key: "<model>\t<target>", value: array of round 2 hits with alignments (see dupfilter_parse_searchout())
+my $dupfilter_null_file   = undef; # null threshold table file, always $RIBOSCRIPTSDIR/models/ribo.dupfilter.null.tsv
+my $dupfilter_null_HR     = undef; # null threshold table, read by ribo_DupfilterNullLoad()
+my $dupfilter_FH          = undef; # file handle for per-alert .dupfilter.tsv output file
+my $dupfilter_tmp_root    = undef; # root for temporary blastn query/subject files
+my $dupfilter_nalert      = 0;     # number of sequences with a *DuplicateRegion alert we tried to adjudicate
+my $dupfilter_nremove     = 0;     # number of those alerts that were removed
+my $dupfilter_secs        = 0.;    # seconds spent adjudicating
+
 # deal with 'time' differently because we can deal if it doesn't exist and
 # we only use it if it does exist and -p is used
 my $env_ribotime_dir = ribo_CheckForTimeExecutable(); # this will return undef if time doesn't exist or is undef
@@ -160,6 +174,32 @@ opt_Add("--samedomain",   "boolean", 0,                      12,  undef,   undef
 opt_Add("--skipval",      "boolean", 0,                      12,  undef,   undef,               "skip validation of CM and model info files",        "skip validation of CM and model info files", \%opt_HH, \@opt_order_A);
 opt_Add("--onlyval",      "boolean", 0,                      12,  undef,   "--skipval",         "validate CM and model info files and exit",         "validate CM and model info files and exit", \%opt_HH, \@opt_order_A);
 
+# *DuplicateRegion filter: on by default, --nodupfilter turns it off. See the
+# comment above dupfilter_adjudicate_pair() for the method and its limits.
+$opt_group_desc_H{"13"} = "option for the *DuplicateRegion filter (on by default)\n" . 
+    "  Each *DuplicateRegion alert is checked with blastn. If no pair of overlapping hits behind it\n" . 
+    "  is more similar than chance (p >= 0.05), the alert is removed: it is not reported and does not\n" . 
+    "  cause FAILure (removed alerts are listed in the .dupfilter.tsv output file).\n" . 
+    "  Limits: (1) the test asks whether the two regions are more similar than chance, not whether\n" . 
+    "      the alert is a problem: an exact tandem repeat is always significant and stays FATAL;\n" . 
+    "  (2) *DuplicateRegion itself rarely fires on duplications shorter than ~100-200 nt, so the filter\n" . 
+    "      mostly sees long ones;\n" . 
+    "  (3) on simulated true duplications >= 100 nt, ~0.5% that a Smith-Waterman + shuffle test\n" . 
+    "      calls significant are called not significant here (alert removed), concentrated in\n" . 
+    "      AT-rich or divergent cases with short extracts.\n" . 
+    "  The filter can change ribotyper's PASS/FAIL, and it can also change ribosensor's output: a\n" . 
+    "  sequence with a *DuplicateRegion alert always also has MultipleHits, but ribosensor ignores\n" . 
+    "  MultipleHits for a sequence that rRNA_sensor passes, so such a sequence can go from FAIL to\n" . 
+    "  PASS in ribosensor, and SEQ_HOM_MisAsDupRegion is no longer reported for any removed alert.\n" . 
+    "  The filter is not applied (alerts stay FATAL) with --1slow, --1hmm, --1blast, --2slow, --noali\n" . 
+    "  or --skipsearch. Otherwise, ribotyper exits with an error, before any search, if blastn in\n" . 
+    "  \$RIBOBLASTDIR is missing or is not a tested version (" . join(", ", ribo_DupfilterBlastnTestedVersions()) . "), or if the null table\n" . 
+    "  \$RIBOSCRIPTSDIR/models/ribo.dupfilter.null.tsv is missing or differs from the released file\n" . 
+    "  (restore it from https://github.com/NLM-DIR/ribovore), and during the run if blastn fails.\n" . 
+    "  --nodupfilter is the only way to run without the filter";
+#       option               type   default                group  requires incompat             preamble-output                                      help-output    
+opt_Add("--nodupfilter",  "boolean", 0,                      13,  undef,   undef,               "do not filter *DuplicateRegion alerts",             "do not filter *DuplicateRegion alerts with blastn: report every one, FATAL", \%opt_HH, \@opt_order_A);
+
 # This section needs to be kept in sync (manually) with the opt_Add() section above
 my %GetOptions_H = ();
 my $usage    = "Usage: ribotyper [-options] <fasta file to annotate> <output directory>\n";
@@ -238,7 +278,9 @@ my $options_okay =
                 'outxgaps=s'   => \$GetOptions_H{"--outxgaps"},
                 'samedomain'   => \$GetOptions_H{"--samedomain"},
                 'skipval'      => \$GetOptions_H{"--skipval"},
-                'onlyval'      => \$GetOptions_H{"--onlyval"});
+                'onlyval'      => \$GetOptions_H{"--onlyval"},
+# *DuplicateRegion filter
+                'nodupfilter'  => \$GetOptions_H{"--nodupfilter"});
 
 my $total_seconds     = -1 * ofile_SecondsSinceEpoch(); # by multiplying by -1, we can just add another ofile_SecondsSinceEpoch call at end to get total time
 my $executable        = $0;
@@ -497,6 +539,72 @@ if((! opt_Get("--1slow", \%opt_HH)) && (! opt_Get("--1blast", \%opt_HH))) {
   }
   elsif(! opt_Get("--1hmm", \%opt_HH)) { 
     $alg2 = "hmmonly";
+  }
+}
+
+# *DuplicateRegion filter (on unless --nodupfilter): decide if alerts can
+# be adjudicated in this configuration. Adjudication reads the round 2
+# cmsearch --hmmonly alignments, which are computed in the default
+# configuration. If the options used rule it out, the filter is not
+# applied: every alert stays FATAL, exactly as with --nodupfilter, and
+# the reason is recorded in the log and the .dupfilter.tsv file.
+# Otherwise, everything the filter needs from the installation (blastn,
+# a tested blastn version, and the exact null threshold table this
+# version was released with) is checked here, before any search, and
+# any problem is a fatal error: the same options must give the same
+# results on every installation. --nodupfilter is the only way to run
+# without the filter.
+if(! opt_Get("--nodupfilter", \%opt_HH)) { 
+  my $dupfilter_blastn = $env_riboblast_dir . "/blastn";
+  if(! defined $alg2) { 
+    $dupfilter_off_reason = "no round 2 search (--1blast, --1slow or --1hmm)";
+  }
+  elsif($alg2 ne "hmmonly") { 
+    # --2slow round 2 output is CM (not HMM) alignment output; the parser
+    # (dupfilter_parse_searchout()) was written and validated only for
+    # --hmmonly output, so we do not attempt it
+    $dupfilter_off_reason = "--2slow (parser handles only round 2 --hmmonly alignments)";
+  }
+  elsif(opt_Get("--noali", \%opt_HH)) { 
+    $dupfilter_off_reason = "--noali (no round 2 alignments)";
+  }
+  elsif(opt_Get("--skipsearch", \%opt_HH)) { 
+    $dupfilter_off_reason = "--skipsearch (round 2 alignments are not regenerated)";
+  }
+  else { 
+    my $blastn_fix = sprintf("install one of the blastn versions the filter has been tested with (%s) and set \$RIBOBLASTDIR to the directory that contains its blastn executable", 
+                             join(", ", ribo_DupfilterBlastnTestedVersions()));
+    if(! -x $dupfilter_blastn) { 
+      dupfilter_env_fail("blastn executable $dupfilter_blastn does not exist or is not executable", $blastn_fix, $ofile_info_HH{"FH"});
+    }
+    my $blastn_version = eval { ribo_DupfilterBlastnVersion($dupfilter_blastn); };
+    if(! defined $blastn_version) { 
+      dupfilter_env_fail("could not determine the version of $dupfilter_blastn: " . dupfilter_errmsg($@), $blastn_fix, $ofile_info_HH{"FH"});
+    }
+    if(! grep { $_ eq $blastn_version } ribo_DupfilterBlastnTestedVersions()) { 
+      dupfilter_env_fail(sprintf("$dupfilter_blastn is blastn version %s, which the filter has not been tested with (tested versions: %s)", 
+                                 $blastn_version, join(", ", ribo_DupfilterBlastnTestedVersions())), 
+                         $blastn_fix, $ofile_info_HH{"FH"});
+    }
+    # The null threshold table is part of Ribovore, not of a model set, so it
+    # is always read from $RIBOSCRIPTSDIR/models/, whatever -m and -i are.
+    # It is only read when needed, so it is not a requirement with --nodupfilter.
+    $dupfilter_null_file = $env_riboscripts_dir . "/models/ribo.dupfilter.null.tsv";
+    my $table_fix = "re-run the Ribovore installation, or restore models/ribo.dupfilter.null.tsv in \$RIBOSCRIPTSDIR ($env_riboscripts_dir) " . 
+        "from the Ribovore release matching this version ($version) at https://github.com/NLM-DIR/ribovore";
+    if(! -e $dupfilter_null_file) { 
+      dupfilter_env_fail("null threshold table $dupfilter_null_file does not exist", $table_fix, $ofile_info_HH{"FH"});
+    }
+    if(! -r $dupfilter_null_file) { 
+      dupfilter_env_fail("null threshold table $dupfilter_null_file is not readable", $table_fix, $ofile_info_HH{"FH"});
+    }
+    $dupfilter_null_HR = eval { ribo_DupfilterNullLoad($dupfilter_null_file); };
+    if(! defined $dupfilter_null_HR) { 
+      dupfilter_env_fail("could not use the null threshold table: " . dupfilter_errmsg($@), $table_fix, $ofile_info_HH{"FH"});
+    }
+    $do_dupfilter = 1;
+    $execs_H{"blastn"} = $dupfilter_blastn;
+    ofile_OutputString($log_FH, 0, "# DuplicateRegion filter: blastn version $blastn_version, null threshold table md5 " . ribo_DupfilterNullMd5() . "\n");
   }
 }
 
@@ -913,7 +1021,23 @@ if(defined $alg2) {
     if(defined $sfetchfile_H{$model}) { 
       push(@r2_model_A, $model);
       push(@r2_tblout_file_A,    $out_root . ".r2.$model.cmsearch.tbl");
-      push(@r2_searchout_file_A, ((opt_Get("--keep", \%opt_HH)) ? $out_root . ".r2.cmsearch.out" : "/dev/null"));
+      if(opt_Get("--nodupfilter", \%opt_HH)) { 
+        # --nodupfilter reproduces the output of ribotyper without the DuplicateRegion
+        # filter exactly, including its known --keep behaviour: every model writes
+        # the same round 2 search output file, so only the last model's output survives.
+        push(@r2_searchout_file_A, ((opt_Get("--keep", \%opt_HH)) ? $out_root . ".r2.cmsearch.out" : "/dev/null"));
+      }
+      elsif(($do_dupfilter) || (opt_Get("--keep", \%opt_HH))) { 
+        # one round 2 search output file per model: the DuplicateRegion filter
+        # reads each model's alignments, and with --keep each model's output is kept
+        push(@r2_searchout_file_A, $out_root . ".r2.$model.cmsearch.out");
+        if(! opt_Get("--keep", \%opt_HH)) { 
+          push(@to_remove_A, $r2_searchout_file_A[$midx]);
+        }
+      }
+      else { 
+        push(@r2_searchout_file_A, "/dev/null");
+      }
       push(@r2_search_cmd_A,     $execs_H{"cmsearch"} . " -T $min_secondary_sc -Z $Z_value --cpu $ncpu");
 
       if(! opt_Get("--skipsearch", \%opt_HH)) { 
@@ -939,7 +1063,8 @@ if(defined $alg2) {
       }
       else { 
         ofile_AddClosedFileToOutputInfo(\%ofile_info_HH, "r2tblout" . $model, $r2_tblout_file_A[$midx], 0, 1, "$model .tblout file for round 2");
-        ofile_AddClosedFileToOutputInfo(\%ofile_info_HH, "r2searchout" . $model, $r2_searchout_file_A[$midx], 0, 1, "$model .tblout file for round 2");
+        ofile_AddClosedFileToOutputInfo(\%ofile_info_HH, "r2searchout" . $model, $r2_searchout_file_A[$midx], 0, 1, 
+                                        (opt_Get("--nodupfilter", \%opt_HH)) ? "$model .tblout file for round 2" : "$model search output file for round 2");
       }
       $midx++; 
     }
@@ -986,6 +1111,39 @@ if((defined $alg2) && ($nr2 > 0)) {
     ofile_AddClosedFileToOutputInfo(\%ofile_info_HH, "sortedr2alltblout", $r2_all_sorted_tblout_file, 0, 1, "sorted concatenated tblout file for round 2");
   }
   ofile_OutputProgressComplete($start_secs, undef, $log_FH, *STDOUT);
+}
+
+###########################################################################
+# Step 8b (unless --nodupfilter): read round 2 alignments, open the
+#          per-alert output file. Alerts are adjudicated in step 9,
+#          in output_one_target().
+###########################################################################
+my $dupfilter_out_file = undef;
+if(! opt_Get("--nodupfilter", \%opt_HH)) { 
+  $dupfilter_out_file = $out_root . ".dupfilter.tsv";
+  open($dupfilter_FH, ">", $dupfilter_out_file) || ofile_FileOpenFailure($dupfilter_out_file, "ribotyper::Main", $!, "writing", $ofile_info_HH{"FH"});
+  if(! $do_dupfilter) { 
+    print $dupfilter_FH "# DuplicateRegion filter NOT APPLIED, all *DuplicateRegion alerts remain FATAL. Reason: $dupfilter_off_reason\n";
+    ofile_OutputString($log_FH, 0, "# DuplicateRegion filter not applied, all *DuplicateRegion alerts remain FATAL: $dupfilter_off_reason\n");
+  }
+  else { 
+    $start_secs = ofile_OutputProgressPrior("Reading round 2 alignments for DuplicateRegion filter", $progress_w, $log_FH, *STDOUT);
+    my $dupfilter_start = ofile_SecondsSinceEpoch();
+    for($midx = 0; $midx < $nr2; $midx++) { 
+      dupfilter_parse_searchout($r2_searchout_file_A[$midx], $r2_model_A[$midx], \%dupfilter_hit_HA, $ofile_info_HH{"FH"});
+    }
+    $dupfilter_secs += ofile_SecondsSinceEpoch() - $dupfilter_start;
+    $dupfilter_tmp_root = $out_root . ".dupfilter.tmp";
+    printf $dupfilter_FH ("# blastn: %s\n# blastn parameters: %s\n# null table: %s, config %s, built %s, %s null pairs per cell; alpha 0.05\n",
+                          $execs_H{"blastn"}, ribo_DupfilterBlastnParams(), $dupfilter_null_file, 
+                          $dupfilter_null_HR->{"header"}{"config"}          // "?", 
+                          $dupfilter_null_HR->{"header"}{"built"}           // "?", 
+                          $dupfilter_null_HR->{"header"}{"trials_per_cell"} // "?");
+    print $dupfilter_FH "# one line per pair of hits that triggered *DuplicateRegion; a sequence's alert is removed only if EVERY pair is 'not_significant'\n";
+    print $dupfilter_FH join("\t", "#target", "model", "strand", "hits", "M_window", "A_hit_M", "A_hit_S", "B_hit_M", "B_hit_S", 
+                             "A_extract_S", "B_extract_S", "lenA", "lenB", "at_frac", "bits", "cell", "T05", "call", "seq_decision") . "\n";
+    ofile_OutputProgressComplete($start_secs, undef, $log_FH, *STDOUT);
+  }
 }
 
 ###########################################################################
@@ -1038,6 +1196,14 @@ if(defined $alg2) {
   }
   
   ofile_OutputProgressComplete($start_secs, undef, $log_FH, *STDOUT);
+}
+if(defined $dupfilter_FH) { 
+  close($dupfilter_FH);
+  if($do_dupfilter) { 
+    ofile_OutputString($log_FH, 1, sprintf("# DuplicateRegion filter: %d of %d sequence(s) with a *DuplicateRegion alert had it removed (%.1f seconds reading alignments and adjudicating)\n", 
+                                           $dupfilter_nremove, $dupfilter_nalert, $dupfilter_secs));
+  }
+  ofile_AddClosedFileToOutputInfo(\%ofile_info_HH, "dupfilter", $dupfilter_out_file, 1, 1, "DuplicateRegion filter per-alert results (removed alerts)");
 }
 ###########################################################################
 # Step 10: Combine the round 1 and round 2 output files to create the 
@@ -2200,6 +2366,7 @@ sub output_one_target {
 
   # determine if we have distinct hits that overlap on the model by more than maximum allowed amount
   my $duplicate_model_region_str = "";
+  my @dup_pair_AA = (); # [i, j, overlap region] for each pair of hits that triggered DuplicateRegion, used only by the DuplicateRegion filter
   if($have_model_coords) { # we can only do this if search output included model coords
     $nhits = scalar(@{$mdl_bd_HHAR->{$wmodel}{$wstrand}});
     my $noverlap_allowed = opt_Get("--maxoverlap", $opt_HHR);
@@ -2218,6 +2385,7 @@ sub output_one_target {
             $duplicate_model_region_str .= ",";
           }
           $duplicate_model_region_str .= "(" . $overlap_str . ")_hits_" . ($i+1) . "_and_" . ($j+1) . "(M:$mdl_bd1,$mdl_bd2,S:$seq_bd1,$seq_bd2)";
+          push(@dup_pair_AA, [$i, $j, $overlap_str]);
         }
       }
     }
@@ -2445,8 +2613,15 @@ sub output_one_target {
   }    
   # duplicate model region
   if($duplicate_model_region_str ne "") { 
-    $pass_fail = "FAIL";
-    $unusual_features .= "*" . $duplicate_model_region_str . ";";
+    # if no pair of hits is more similar than chance, the alert is removed:
+    # it is not reported and does not cause FAILure (the .dupfilter.tsv
+    # file records each removed alert)
+    my $remove_alert = (($round eq "2") && ($do_dupfilter) && 
+                        (dupfilter_adjudicate_alert($target, $wmodel, $wstrand, $mdl_bd_HHAR->{$wmodel}{$wstrand}, $seq_bd_HHAR->{$wmodel}{$wstrand}, \@dup_pair_AA, $FH_HR))) ? 1 : 0;
+    if(! $remove_alert) { 
+      $pass_fail = "FAIL";
+      $unusual_features .= "*" . $duplicate_model_region_str . ";";
+    }
   }    
   # hits in inconsistent order
   if($out_of_order_str ne "") { 
@@ -5232,4 +5407,483 @@ sub prune_blastn_outfmt6 {
   close(OUT);
 
   return;
+}
+
+#################################################################
+# Functions for the *DuplicateRegion filter (on unless --nodupfilter):
+# dupfilter_parse_searchout():  read round 2 cmsearch --hmmonly alignments
+# dupfilter_adjudicate_alert(): adjudicate all pairs of hits behind one *DuplicateRegion alert
+# dupfilter_adjudicate_pair():  adjudicate one pair of hits with blastn and the null table
+# dupfilter_extract_window():   extract a hit's residues within a model-coordinate window
+#
+# dupfilter_env_fail():         exit with an error for a problem that prevents the filter from running
+# dupfilter_errmsg():           reduce a die() message to one line for use in an error message
+#
+# These are only called if the filter is on and adjudication is
+# possible ($do_dupfilter == 1). A problem that depends on the
+# installation or the computing environment (blastn cannot be run or
+# its output cannot be read, a temporary file cannot be written, or the
+# round 2 search output cannot be read or does not contain the hits'
+# alignments) is a fatal error: dupfilter_env_fail(). A pair that
+# cannot be adjudicated because of the data itself (no residue of a
+# hit in the overlap region, or an extract longer than the null table
+# covers) 'fails closed': that alert remains FATAL exactly as with
+# --nodupfilter, and the reason is listed in the .dupfilter.tsv file.
+#################################################################
+
+#################################################################
+# Subroutine:  dupfilter_env_fail()
+#
+# Purpose:     Exit with an error because the *DuplicateRegion filter
+#              is on but cannot be run as it must be. The message says
+#              what is wrong, how to fix it, and that --nodupfilter is
+#              the only way to run without the filter. It is printed
+#              to STDERR and to the .log and .cmd files, by ofile_FAIL().
+#
+# Arguments:
+#   $problem:  what is wrong
+#   $fix:      how to fix it
+#   $FH_HR:    ref to hash of file handles, including "log" and "cmd"
+#
+# Returns:     never
+#################################################################
+sub dupfilter_env_fail { 
+  my $sub_name = "dupfilter_env_fail";
+  my $nargs_expected = 3;
+  if(scalar(@_) != $nargs_expected) { printf STDERR ("ERROR, $sub_name entered with %d != %d input arguments.\n", scalar(@_), $nargs_expected); exit(1); } 
+
+  my ($problem, $fix, $FH_HR) = (@_);
+
+  ofile_FAIL("ERROR, the *DuplicateRegion filter (on by default) cannot be run:\n" . 
+             "  $problem\n" . 
+             "To fix this, $fix.\n" . 
+             "To run without the *DuplicateRegion filter instead, use the --nodupfilter option\n" . 
+             "(results will then differ from a default run: every *DuplicateRegion alert is FATAL).\n", 1, $FH_HR);
+
+  return; # never reached
+}
+
+#################################################################
+# Subroutine:  dupfilter_errmsg()
+#
+# Purpose:     Reduce an error message caught from die() to one line,
+#              without the 'ERROR in <function>, ' prefix.
+#
+# Arguments:
+#   $err:      error message
+#
+# Returns:     the one-line message
+#################################################################
+sub dupfilter_errmsg { 
+  my ($err) = (@_);
+
+  if(! defined $err) { $err = ""; }
+  $err =~ s/^ERROR in \w+, //;
+  $err =~ s/\n/ /g;
+  $err =~ s/\s+$//;
+
+  return $err;
+}
+
+#################################################################
+# Subroutine:  dupfilter_parse_searchout()
+#
+# Purpose:     Parse one model's round 2 cmsearch --hmmonly standard
+#              output and store, for each target with 2 or more hits,
+#              each hit's coordinates plus its alignment's consensus
+#              structure (CS) and target rows.
+#
+#              With -p the file is a concatenation of one cmsearch
+#              output per job, each with its own header and footer,
+#              so parsing is block-based: a 'Query:' line, a '//' line
+#              or an 'Internal pipeline statistics' line ends the
+#              current target.
+#
+# Arguments:
+#   $searchout_file: cmsearch output file to parse
+#   $model:          name of the model searched in $searchout_file
+#   $hit_HAR:        ref to hash of arrays, key "<model>\t<target>", FILLED HERE
+#                    value: array of hashes with keys "mdlfrom", "mdlto",
+#                    "seqfrom", "seqto", "strand", "cs", "tgt"
+#   $FH_HR:          ref to hash of file handles, including "log"
+#
+# Returns:  void
+#
+# Dies:     via dupfilter_env_fail() if the file cannot be opened
+#################################################################
+sub dupfilter_parse_searchout { 
+  my $sub_name = "dupfilter_parse_searchout";
+  my $nargs_expected = 4;
+  if(scalar(@_) != $nargs_expected) { printf STDERR ("ERROR, $sub_name entered with %d != %d input arguments.\n", scalar(@_), $nargs_expected); exit(1); } 
+
+  my ($searchout_file, $model, $hit_HAR, $FH_HR) = (@_);
+
+  my $in_FH = undef;
+  if(! open($in_FH, "<", $searchout_file)) { 
+    dupfilter_env_fail("could not open round 2 search output file $searchout_file for model $model: $!", 
+                       "make sure the output directory is readable and has free space, and re-run", $FH_HR);
+  }
+  my %tmp_hit_HA = (); # key: target, value: array of hits
+  my $qmodel = undef;  # model named on the current block's 'Query:' line
+  my $target = undef;  # target of the current '>>' section, undef if not in one
+  my $hit_HR = undef;  # current hit, undef if not in one
+  while(my $line = <$in_FH>) { 
+    chomp $line;
+    if($line =~ m/^Query:\s+(\S+)/) { 
+      $qmodel = $1; $target = undef; $hit_HR = undef;
+    }
+    elsif(($line =~ m/^\/\/\s*$/) || ($line =~ m/^Internal pipeline statistics/) || ($line =~ m/^Hit scores:/)) { 
+      $target = undef; $hit_HR = undef;
+    }
+    elsif($line =~ m/^>>\s+(\S+)/) { 
+      $target = $1; $hit_HR = undef;
+    }
+    elsif(defined $target) { 
+      #  (1) !  1.1e-211  692.4 305.2 hmm       10     1967 ..           6        2039 + .. 0.89     - 0.21
+      if($line =~ m/^\s*\(\d+\)\s*[\!\?]\s+\S+\s+\S+\s+\S+\s+\S+\s+(\d+)\s+(\d+)\s+\S+\s+(\d+)\s+(\d+)\s+([\+\-])\s/) { 
+        if((defined $qmodel) && ($qmodel eq $model)) { 
+          $hit_HR = { "mdlfrom" => $1, "mdlto" => $2, "seqfrom" => $3, "seqto" => $4, "strand" => $5, "cs" => "", "tgt" => "" };
+          push(@{$tmp_hit_HA{$target}}, $hit_HR);
+        }
+        else { 
+          $hit_HR = undef;
+        }
+      }
+      elsif(defined $hit_HR) { 
+        if($line =~ m/^(.*) CS\s*$/) { 
+          my $cs = $1;
+          $cs =~ s/^\s+//;
+          $cs =~ s/\s+$//;
+          $hit_HR->{"cs"} .= $cs;
+        }
+        elsif(($line =~ m/^\s*(\S+)\s+(\d+|\-)\s+(\S+)\s+(\d+|\-)\s*$/) && ($1 eq $target)) { 
+          $hit_HR->{"tgt"} .= $3;
+        }
+      }
+    }
+  }
+  close($in_FH);
+
+  # only targets with at least 2 hits can have a DuplicateRegion alert
+  foreach $target (keys %tmp_hit_HA) { 
+    if(scalar(@{$tmp_hit_HA{$target}}) >= 2) { 
+      push(@{$hit_HAR->{$model . "\t" . $target}}, @{$tmp_hit_HA{$target}});
+    }
+  }
+
+  return;
+}
+
+#################################################################
+# Subroutine:  dupfilter_adjudicate_alert()
+#
+# Purpose:     Adjudicate one sequence's *DuplicateRegion alert: each
+#              pair of hits that triggered it is tested with
+#              dupfilter_adjudicate_pair(), and one line per pair is
+#              written to the .dupfilter.tsv output file.
+#
+# Arguments:
+#   $target:     target sequence name
+#   $model:      winning model
+#   $strand:     strand of the winning hits
+#   $mdl_bd_AR:  ref to array of model boundaries "<from>.<to>" of all hits, in tblout order
+#   $seq_bd_AR:  ref to array of sequence boundaries "<from>.<to>" of all hits, in tblout order
+#   $pair_AAR:   ref to array of [i, j, "<lo>-<hi>"]: indices in the two arrays
+#                above of each pair of hits that triggered the alert, and
+#                the model region in which they overlap
+#   $FH_HR:      ref to hash of file handles
+#
+# Returns:  '1' if EVERY pair was adjudicated and none is more similar
+#           than chance, so the alert should be removed;
+#           '0' otherwise (the alert stays FATAL).
+#
+#################################################################
+sub dupfilter_adjudicate_alert { 
+  my $sub_name = "dupfilter_adjudicate_alert";
+  my $nargs_expected = 7;
+  if(scalar(@_) != $nargs_expected) { printf STDERR ("ERROR, $sub_name entered with %d != %d input arguments.\n", scalar(@_), $nargs_expected); exit(1); } 
+
+  my ($target, $model, $strand, $mdl_bd_AR, $seq_bd_AR, $pair_AAR, $FH_HR) = (@_);
+
+  my $start_secs = ofile_SecondsSinceEpoch();
+  $dupfilter_nalert++;
+
+  my $hits_AR = $dupfilter_hit_HA{$model . "\t" . $target};
+  my @line_A = ();
+  my $all_not_significant = (scalar(@{$pair_AAR}) > 0) ? 1 : 0;
+  foreach my $pair_AR (@{$pair_AAR}) { 
+    my ($i, $j, $overlap_str) = (@{$pair_AR});
+    my %res_H = dupfilter_adjudicate_pair($target, $model, $hits_AR, $mdl_bd_AR->[$i], $seq_bd_AR->[$i], $mdl_bd_AR->[$j], $seq_bd_AR->[$j], $overlap_str, $FH_HR);
+    if($res_H{"call"} ne "not_significant") { $all_not_significant = 0; }
+    push(@line_A, join("\t", $target, $model, $strand, ($i+1) . "," . ($j+1), $overlap_str, 
+                       $mdl_bd_AR->[$i], $seq_bd_AR->[$i], $mdl_bd_AR->[$j], $seq_bd_AR->[$j], 
+                       map { defined $res_H{$_} ? $res_H{$_} : "-" } ("A_extract_S", "B_extract_S", "lenA", "lenB", "at_frac", "bits", "cell", "T05", "call")));
+  }
+  foreach my $line (@line_A) { 
+    print $dupfilter_FH $line . "\t" . (($all_not_significant) ? "removed" : "FATAL") . "\n";
+  }
+  if($all_not_significant) { $dupfilter_nremove++; }
+  $dupfilter_secs += ofile_SecondsSinceEpoch() - $start_secs;
+
+  return $all_not_significant;
+}
+
+#################################################################
+# Subroutine:  dupfilter_adjudicate_pair()
+#
+# Purpose:     Decide whether two hits to the same model that overlap
+#              in model coordinates are more similar to each other than
+#              chance.
+#
+# Method:      Each hit's residues aligned to model positions within
+#              the overlap region (plus any inserted residues between
+#              the first and last of those) are extracted from the round
+#              2 alignment. The two extracts are compared with ONE
+#              blastn call (shorter extract as query) using the exact
+#              parameters the null table was built with, and the maximum
+#              HSP bit score (0 if none) is compared with the table's
+#              threshold for the extracts' lengths and AT fraction
+#              (alpha 0.05). The pair is 'significant' if the score is
+#              above the threshold, otherwise 'not_significant'
+#              (p >= 0.05). blastn's own E-value is never used: it
+#              badly overstates the similarity of unrelated AT-rich
+#              sequences.
+#
+#              The table ($RIBOSCRIPTSDIR/models/ribo.dupfilter.null.tsv,
+#              read and validated by ribo_DupfilterNullLoad() in ribo.pm;
+#              its header describes how it was built) holds thresholds
+#              from 500 iid random sequence pairs per (length, length,
+#              AT skew) grid cell, computed with blastn 2.11.0+; lookups
+#              round every coordinate UP to the next grid point. Scores from blastn 2.14.1+ were
+#              identical on the constructs it was checked on. ribotyper
+#              refuses to run the filter with a blastn version other than
+#              those listed by ribo_DupfilterBlastnTestedVersions(), or
+#              with a table whose md5 is not ribo_DupfilterNullMd5().
+#
+# Limits:      (1) This answers 'are the two regions more similar than
+#              chance?', not 'is this alert a problem?'. An exact
+#              tandem repeat is always significant, so an alert a human
+#              judges spurious for other reasons stays FATAL.
+#              (2) *DuplicateRegion rarely fires on duplications
+#              shorter than ~100-200 nt, so in practice this sees long
+#              ones.
+#              (3) Sensitivity cost: on simulated true duplications of
+#              >= 100 nt, about 0.5% that a Smith-Waterman + per-alert
+#              shuffle test calls significant are called
+#              not_significant here (the alert is removed),
+#              concentrated in AT-rich or divergent cases with short
+#              extracts.
+#              (4) Removing an alert changes ribotyper PASS/FAIL, and can
+#              also change ribosensor's output: the sequence still has
+#              MultipleHits, which ribosensor ignores when rRNA_sensor
+#              passes the sequence, so it can go from FAIL to PASS in
+#              ribosensor; SEQ_HOM_MisAsDupRegion is no longer reported.
+#
+#              A property of the data that prevents a call returns
+#              'FAIL_CLOSED:<why>', which keeps the alert FATAL: no
+#              residue of a hit in the overlap region
+#              (NO_RESIDUES_IN_WINDOW), a hit whose alignment does not
+#              show all of its residues (ALIGNMENT_RESIDUE_COUNT_MISMATCH),
+#              or an extract longer than the table covers
+#              (LENGTH_ABOVE_GRID, > 1000 nt).
+#              Anything else that prevents a call can only come from
+#              the installation or the computing environment, and is a
+#              fatal error (dupfilter_env_fail()): the round 2
+#              alignments are missing or cannot be matched to the hits,
+#              a temporary file cannot be written, or blastn fails or
+#              its output cannot be read.
+#
+# Arguments:
+#   $target:       target sequence name
+#   $model:        model the hits are to
+#   $hits_AR:      ref to array of this target's round 2 hits with alignments (may be undef)
+#   $mdl_bd1:      model boundaries of hit A, "<from>.<to>"
+#   $seq_bd1:      sequence boundaries of hit A, "<from>.<to>"
+#   $mdl_bd2:      model boundaries of hit B
+#   $seq_bd2:      sequence boundaries of hit B
+#   $overlap_str:  model region in which the hits overlap, "<lo>-<hi>"
+#   $FH_HR:        ref to hash of file handles
+#
+# Returns:  hash with key "call" ("significant", "not_significant" or
+#           "FAIL_CLOSED:<why>") and, when computed, "A_extract_S",
+#           "B_extract_S", "lenA", "lenB", "at_frac", "bits", "cell", "T05"
+#
+#################################################################
+sub dupfilter_adjudicate_pair { 
+  my $sub_name = "dupfilter_adjudicate_pair";
+  my $nargs_expected = 9;
+  if(scalar(@_) != $nargs_expected) { printf STDERR ("ERROR, $sub_name entered with %d != %d input arguments.\n", scalar(@_), $nargs_expected); exit(1); } 
+
+  my ($target, $model, $hits_AR, $mdl_bd1, $seq_bd1, $mdl_bd2, $seq_bd2, $overlap_str, $FH_HR) = (@_);
+
+  # the round 2 search output that holds the alignments was written by
+  # this run, so if it does not hold them, something went wrong outside
+  # ribotyper (e.g. a truncated file or an unexpected cmsearch version)
+  my $aln_problem = "the round 2 search output for model $model does not contain the alignments of the hits of $target that triggered *DuplicateRegion (model $mdl_bd1 and $mdl_bd2, sequence $seq_bd1 and $seq_bd2)";
+  my $aln_fix     = "make sure the output directory has free space and \$RIBOINFERNALDIR is the Infernal installed with Ribovore, and re-run; if this happens again, please report it at https://github.com/NLM-DIR/ribovore/issues";
+  my %res_H = ();
+  if(! defined $hits_AR) { 
+    dupfilter_env_fail($aln_problem . " (no alignments)", $aln_fix, $FH_HR);
+  }
+  my ($m_lo, $m_hi) = ($overlap_str =~ m/^(\d+)\-(\d+)$/);
+  if(! defined $m_hi) { 
+    # internal inconsistency, cannot happen: $overlap_str is formatted by the caller
+    $res_H{"call"} = "FAIL_CLOSED:BAD_OVERLAP_REGION";
+    return %res_H;
+  }
+
+  # find the two hits by their exact coordinates
+  my @ext_A = ();
+  foreach my $bd_AR ([$mdl_bd1, $seq_bd1], [$mdl_bd2, $seq_bd2]) { 
+    my ($mdlfrom, $mdlto) = split(/\./, $bd_AR->[0]);
+    my ($seqfrom, $seqto) = split(/\./, $bd_AR->[1]);
+    my $hit_HR = undef;
+    foreach my $cand_HR (@{$hits_AR}) { 
+      if(($cand_HR->{"mdlfrom"} == $mdlfrom) && ($cand_HR->{"mdlto"} == $mdlto) && 
+         ($cand_HR->{"seqfrom"} == $seqfrom) && ($cand_HR->{"seqto"} == $seqto)) { 
+        $hit_HR = $cand_HR;
+        last;
+      }
+    }
+    if(! defined $hit_HR) { 
+      dupfilter_env_fail($aln_problem . " (hit model $bd_AR->[0], sequence $bd_AR->[1] not found)", $aln_fix, $FH_HR);
+    }
+    my ($ext, $ext_coords, $errmsg) = dupfilter_extract_window($hit_HR, $m_lo, $m_hi);
+    if(defined $errmsg) { 
+      if(($errmsg eq "ALIGNMENT_MISSING") || ($errmsg eq "ALIGNMENT_LENGTH_MISMATCH")) { 
+        # the alignment of this hit could not be read from the search output
+        dupfilter_env_fail($aln_problem . " (hit model $bd_AR->[0], sequence $bd_AR->[1]: $errmsg)", $aln_fix, $FH_HR);
+      }
+      # NO_RESIDUES_IN_WINDOW or ALIGNMENT_RESIDUE_COUNT_MISMATCH: a property of this hit's alignment
+      $res_H{"call"} = "FAIL_CLOSED:" . $errmsg;
+      return %res_H;
+    }
+    push(@ext_A, [$ext, $ext_coords]);
+  }
+  my ($seqA, $seqB) = ($ext_A[0][0], $ext_A[1][0]);
+  $res_H{"A_extract_S"} = $ext_A[0][1];
+  $res_H{"B_extract_S"} = $ext_A[1][1];
+  $res_H{"lenA"} = length($seqA);
+  $res_H{"lenB"} = length($seqB);
+  my $nat = (($seqA . $seqB) =~ tr/AaTtUu//);
+  my $at  = $nat / length($seqA . $seqB);
+  $res_H{"at_frac"} = sprintf("%.3f", $at);
+
+  my ($thresh, $cell) = ribo_DupfilterNullThreshold($dupfilter_null_HR, length($seqA), length($seqB), $at);
+  if(! defined $thresh) { 
+    $res_H{"call"} = "FAIL_CLOSED:" . $cell; # $cell holds the reason, e.g. LENGTH_ABOVE_GRID
+    return %res_H;
+  }
+  $res_H{"cell"} = $cell;
+  $res_H{"T05"}  = $thresh;
+
+  # one blastn call, shorter extract is the query (the orientation the table was built in)
+  my ($qseq, $sseq) = ribo_DupfilterOrientPair($seqA, $seqB);
+  my $qfile   = $dupfilter_tmp_root . ".q.fa";
+  my $sfile   = $dupfilter_tmp_root . ".s.fa";
+  my $errfile = $dupfilter_tmp_root . ".err";
+  my ($q_FH, $s_FH);
+  if((! open($q_FH, ">", $qfile)) || (! open($s_FH, ">", $sfile))) { 
+    dupfilter_env_fail("could not write temporary blastn input file $qfile or $sfile: $!", 
+                       "make sure the output directory is writable and has free space, and re-run", $FH_HR);
+  }
+  print $q_FH ">q\n$qseq\n"; close($q_FH);
+  print $s_FH ">s\n$sseq\n"; close($s_FH);
+  my $cmd = $execs_H{"blastn"} . " -query $qfile -subject $sfile " . ribo_DupfilterBlastnParams() . " -outfmt '6 bitscore' 2> $errfile";
+  my @out_A = `$cmd`;
+  my $status = $?;
+  my $blastn_fix = "make sure $execs_H{\"blastn\"} runs and the output directory has free space, and re-run";
+  if($status != 0) { 
+    my $errline = "";
+    my $err_FH;
+    if(open($err_FH, "<", $errfile)) { 
+      while(my $eline = <$err_FH>) { if($eline =~ m/\S/) { chomp $eline; $errline = ": " . $eline; last; } }
+      close($err_FH);
+    }
+    unlink($qfile, $sfile, $errfile);
+    dupfilter_env_fail(sprintf("blastn failed (exit status %d) comparing two hits of $target to $model%s", ($status == -1) ? -1 : ($status >> 8), $errline), 
+                       $blastn_fix, $FH_HR);
+  }
+  unlink($qfile, $sfile, $errfile);
+  my $bits = 0.;
+  foreach my $line (@out_A) { 
+    chomp $line;
+    $line =~ s/^\s+//; $line =~ s/\s+$//;
+    if($line !~ m/^[\d\.eE\+\-]+$/) { 
+      dupfilter_env_fail("could not read blastn output comparing two hits of $target to $model, unexpected line: '$line'", $blastn_fix, $FH_HR);
+    }
+    if($line > $bits) { $bits = $line; }
+  }
+  $res_H{"bits"} = $bits;
+  $res_H{"call"} = ($bits > $thresh) ? "significant" : "not_significant";
+
+  return %res_H;
+}
+
+#################################################################
+# Subroutine:  dupfilter_extract_window()
+#
+# Purpose:     Given a hit with its alignment (CS and target rows),
+#              return the target residues from the first to the last
+#              residue aligned to a model (consensus) position in
+#              [$m_lo, $m_hi], including inserted residues in between.
+#              Residues are upper-cased and U is converted to T.
+#
+# Arguments:
+#   $hit_HR:  ref to hit hash (see dupfilter_parse_searchout())
+#   $m_lo:    first model position of the window
+#   $m_hi:    last model position of the window
+#
+# Returns:  three values: extracted sequence, its sequence coordinates
+#           "<from>-<to>" (from > to on the minus strand), and undef;
+#           or (undef, undef, <reason>) if the alignment is missing or
+#           inconsistent with the hit's coordinates, or no residue
+#           falls in the window
+#################################################################
+sub dupfilter_extract_window { 
+  my $sub_name = "dupfilter_extract_window";
+  my $nargs_expected = 3;
+  if(scalar(@_) != $nargs_expected) { printf STDERR ("ERROR, $sub_name entered with %d != %d input arguments.\n", scalar(@_), $nargs_expected); exit(1); } 
+
+  my ($hit_HR, $m_lo, $m_hi) = (@_);
+
+  my $cs  = $hit_HR->{"cs"};
+  my $tgt = $hit_HR->{"tgt"};
+  if((length($cs) == 0) || (length($tgt) == 0)) { return (undef, undef, "ALIGNMENT_MISSING"); }
+  if(length($cs) != length($tgt))              { return (undef, undef, "ALIGNMENT_LENGTH_MISMATCH"); }
+  # every residue of the hit must be shown in the alignment, e.g. no collapsed inserts
+  my $nres = ($tgt =~ tr/A-Za-z//);
+  if($nres != (abs($hit_HR->{"seqto"} - $hit_HR->{"seqfrom"}) + 1)) { return (undef, undef, "ALIGNMENT_RESIDUE_COUNT_MISMATCH"); }
+
+  my $mdlpos  = $hit_HR->{"mdlfrom"} - 1;
+  my $respos  = 0;     # number of residues seen so far
+  my $first   = undef; # index (1..$nres) of first residue in window
+  my $last    = undef; # index (1..$nres) of last residue in window
+  my $alen    = length($cs);
+  for(my $apos = 0; $apos < $alen; $apos++) { 
+    my $is_consensus = (substr($cs, $apos, 1) ne ".") ? 1 : 0;
+    if($is_consensus) { $mdlpos++; }
+    if(substr($tgt, $apos, 1) =~ m/[A-Za-z]/) { 
+      $respos++;
+      if($is_consensus && ($mdlpos >= $m_lo) && ($mdlpos <= $m_hi)) { 
+        if(! defined $first) { $first = $respos; }
+        $last = $respos;
+      }
+    }
+  }
+  if(! defined $first) { return (undef, undef, "NO_RESIDUES_IN_WINDOW"); }
+
+  my $res = $tgt;
+  $res =~ s/[^A-Za-z]//g;
+  my $ext = uc(substr($res, $first-1, $last-$first+1));
+  $ext =~ tr/U/T/;
+  my ($sfrom, $sto);
+  if($hit_HR->{"seqfrom"} <= $hit_HR->{"seqto"}) { 
+    ($sfrom, $sto) = ($hit_HR->{"seqfrom"} + $first - 1, $hit_HR->{"seqfrom"} + $last - 1);
+  }
+  else { 
+    ($sfrom, $sto) = ($hit_HR->{"seqfrom"} - $first + 1, $hit_HR->{"seqfrom"} - $last + 1);
+  }
+
+  return ($ext, $sfrom . "-" . $sto, undef);
 }

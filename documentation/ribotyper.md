@@ -163,6 +163,19 @@ The two file types are a 'short' file of 6 columns, and a 'long' file
 with 20 columns with more information. Each file includes a
 description of the columns at the end of the file.
 
+Unless `--nodupfilter` is used, the output directory also includes a
+tab-delimited `.dupfilter.tsv` file with one line per pair of
+overlapping hits checked by the [DuplicateRegion filter](#dupfilter)
+(hit and extract coordinates, extract lengths and AT fraction, `blastn`
+bit score, threshold, call, and whether the sequence's alert was
+`removed` or kept as `FATAL`). If the filter was not applied, its first
+line gives the reason.
+
+With `--keep`, the round 2 search output (including alignments) is
+saved in one file per model, `.r2.<model>.cmsearch.out` (with
+`--nodupfilter`, all models share one `.r2.cmsearch.out` file, so only
+the last model's output is kept).
+
 <a name="short"></a> The short file is included below. Note that the meaning of the columns are briefly explained
 in comment lines (prefixed with `#`) after the tabular output, along with explanations of
 possible values in the `unexpected_features` column. These are explained more [below](#unexpectedfeatures).
@@ -311,7 +324,9 @@ causes failure***.
 5. ***DuplicateRegion***: At least two hits overlap in model coordinates
 by `P` positions or more. The threshold `P` is 10 by default but can be
 changed to `<n>` with the `--maxoverlap <n>` option. ***Always causes 
-failure***.
+failure***, but by default the alert is first checked by the
+[DuplicateRegion filter](#dupfilter) and removed if the overlapping
+hits are no more similar to each other than chance.
 
     Example message in `.out` output files:
 
@@ -325,6 +340,76 @@ failure***.
     Example message in `.out` output files:
 
     `InconsistentHits:seq_order(1,2[56.1322,1385.1407]),mdl_order(2,1[103.1356,7.29])`; indicating that hit `1` comes before hit `2` in the sequence (hit `1` sequence positions are `56` to `1322` and hit `2` sequence positinos are `1385` to `1407`) but hit `1` comes after hit `2` in the model (hit `1` model positions are `103` to `1356` and hit `2` model positions are `7` to `29`)
+
+    <a name="dupfilter"></a>**The DuplicateRegion filter (on by default; turn it off with `--nodupfilter`).**
+    Two hits can overlap in model coordinates without the sequence
+    containing a duplication, for example when a divergent or AT-rich
+    region matches the same part of the model twice by chance. So, by
+    default, each pair of overlapping hits behind a DuplicateRegion alert
+    is checked: the residues of each hit that align to the overlapping
+    model positions are extracted and compared to each other with one
+    `blastn` call, and the maximum bit score is compared with a threshold
+    for extracts of those lengths and base composition, precomputed from
+    random sequence pairs (`models/ribo.dupfilter.null.tsv` in
+    `$RIBOSCRIPTSDIR`). If **no** pair scores above its threshold (that
+    is, no pair is more similar than chance, p >= 0.05), the alert is
+    removed: it is not reported and does not cause failure. Otherwise the
+    alert is reported exactly as it would be without the filter. So every
+    DuplicateRegion alert that `ribotyper` reports causes failure. Each
+    adjudicated pair, including every removed alert, is listed in the
+    `.dupfilter.tsv` output file.
+
+    Limits of the filter:
+    * It answers the question "are the two regions more similar than
+      chance?", not "is this alert a problem?". An exact tandem repeat is
+      always significant, so its alert is always kept.
+    * DuplicateRegion itself rarely fires on duplications shorter than
+      about 100-200 nucleotides, so the filter mostly sees long ones.
+    * On simulated true duplications of 100 nucleotides or more, about
+      0.5% of the duplications that a Smith-Waterman alignment plus
+      shuffle test calls significant are called not significant by the
+      filter (so their alerts would be removed), mostly AT-rich or
+      divergent ones with short extracts.
+    * Removing an alert changes `ribotyper`'s PASS/FAIL for that
+      sequence. It can also change `ribosensor`'s output. A sequence
+      with a DuplicateRegion alert always also has a MultipleHits
+      unexpected feature, but `ribosensor` ignores MultipleHits for a
+      sequence that `rRNA_sensor` passes, so such a sequence can go
+      from FAIL to PASS in `ribosensor`. In every case the GenBank
+      error `SEQ_HOM_MisAsDupRegion` is no longer reported for a
+      removed alert, which can also change whether a failing sequence
+      fails to the submitter or to the indexer.
+    * The filter is not applied, and every alert is kept, with `--1slow`,
+      `--1hmm`, `--1blast`, `--2slow`, `--noali` or `--skipsearch` (the
+      reason is recorded in the `.log` and `.dupfilter.tsv` files).
+
+    **Installation requirements of the filter.** The same version of
+    `ribotyper` run with the same options must give the same results on
+    every installation, so if the filter is on and cannot run exactly as
+    released, `ribotyper` stops with an error rather than silently
+    skipping it. The error message says what is wrong and how to fix it.
+    `ribotyper` exits with an error, **before any search starts**, if:
+    * `blastn` in `$RIBOBLASTDIR` does not exist or is not executable;
+    * `blastn -version` reports a version the filter has not been tested
+      with (tested: 2.11.0+ and 2.14.1+; `install.sh` installs 2.14.1+);
+    * the threshold table `models/ribo.dupfilter.null.tsv` in
+      `$RIBOSCRIPTSDIR` is missing, unreadable, or not the exact file
+      released with this version of Ribovore (its md5 checksum is
+      checked). To fix this, re-run the Ribovore installation, or restore
+      the file from the Ribovore release matching your version at
+      [https://github.com/NLM-DIR/ribovore](https://github.com/NLM-DIR/ribovore).
+
+    It also stops with an error during the run if a `blastn` comparison
+    fails or its output cannot be read, a temporary file cannot be
+    written, or the round 2 search output cannot be read or does not
+    contain the alignments of the hits behind an alert.
+
+    The only way to run without the filter is the `--nodupfilter` option
+    (results will then differ from a default run). `riboaligner` and
+    `ribodbmaker` can pass it to `ribotyper` in the file given with
+    their `--riboopts` (`riboaligner`) or `--riboopts1` and `--riboopts2`
+    (`ribodbmaker`) options. `ribosensor` has no way to pass it, so
+    for `ribosensor` the installation problem must be fixed.
 
 7. ***QuestionableModel***: Best hit is to a model that is
 'questionable'. By default, no models are questionable, but the user
@@ -702,6 +787,10 @@ advanced options:
   --samedomain : top two hits can be to models in the same domain
   --skipval    : skip validation of CM and model info files
   --onlyval    : validate CM and model info files and exit
+
+option for the *DuplicateRegion filter (on by default)
+  [see the DuplicateRegion filter section above for what the filter does, its limits and its installation requirements]
+  --nodupfilter : do not filter *DuplicateRegion alerts with blastn: report every one, FATAL
 ```
 
 ---

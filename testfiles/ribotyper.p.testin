@@ -26,3 +26,10 @@ out: r100-p/r100-p.ribotyper.long.out
 exp: @RIBOSCRIPTSDIR@/testfiles/expected-files/r100.ribotyper.short.out
 exp: @RIBOSCRIPTSDIR@/testfiles/expected-files/r100.ribotyper.long.out
 rmdir: r100-p
+command: cp $RIBOSCRIPTSDIR/testfiles/dupfilter-2.fa ./; perl $RIBOSCRIPTSDIR/ribotyper -p -f dupfilter-2.fa test-df2-p > /dev/null;
+desc: ribotyper-dupfilter-2-p
+out: test-df2-p/test-df2-p.ribotyper.short.out
+out: test-df2-p/test-df2-p.ribotyper.long.out
+exp: @RIBOSCRIPTSDIR@/testfiles/expected-files/test-df2.ribotyper.short.out
+exp: @RIBOSCRIPTSDIR@/testfiles/expected-files/test-df2.ribotyper.long.out
+rmdir: test-df2-p

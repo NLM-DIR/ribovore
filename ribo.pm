@@ -63,6 +63,16 @@ require $ribo_sequip_dir . "/sqp_utils.pm";
 # ribo_CheckForTimeExecutable
 # ribo_ParseStoredIndiCmFileName
 #
+# DuplicateRegion filter (ribotyper) null threshold table:
+# ribo_DupfilterBlastnParams
+# ribo_DupfilterNullLoad
+# ribo_DupfilterAssertBlastnParams
+# ribo_DupfilterOrientPair
+# ribo_DupfilterRoundUp
+# ribo_DupfilterNullLookupCell
+# ribo_DupfilterNullThreshold
+# ribo_DupfilterIsSignificant
+#
 #################################################################
 # Subroutine : ribo_CountAmbiguousNucleotidesInSequenceFile()
 # Incept:      EPN, Tue May 29 14:51:35 2018
@@ -1776,6 +1786,453 @@ sub ribo_ParseStoredIndiCmFileName {
   }
 
   return ($cmfile, $model, $do_fetch);
+}
+
+#################################################################
+# Subroutine: ribo_DupfilterBlastnParams()
+# Incept:     Thu Sep 25 2026
+#
+# Purpose:    Return the blastn parameter string that ribotyper's
+#             *DuplicateRegion filter passes to blastn (in addition
+#             to -query, -subject and -outfmt). The null threshold
+#             table (ribo.dupfilter.null.tsv) is only valid for
+#             exactly these parameters, and ribo_DupfilterNullLoad()
+#             checks that the table's header records the same string.
+#
+# Arguments:  none
+#
+# Returns:    blastn parameter string
+#
+#################################################################
+sub ribo_DupfilterBlastnParams { 
+  return "-task blastn -word_size 4 -dust no -soft_masking false -evalue 1000000 -reward 2 -penalty -3 -gapopen 5 -gapextend 2";
+}
+
+#################################################################
+# Subroutine: ribo_DupfilterBlastnTestedVersions()
+# Incept:     Sat Sep 26 2026
+#
+# Purpose:    Return the blastn versions, as printed by 'blastn
+#             -version', that ribotyper's *DuplicateRegion filter
+#             has been tested with. The null threshold table was
+#             built with the first one; the others gave identical
+#             scores. ribotyper refuses to apply the filter with any
+#             other version.
+#
+# Arguments:  none
+#
+# Returns:    array of version strings, e.g. "2.14.1+"
+#
+#################################################################
+sub ribo_DupfilterBlastnTestedVersions { 
+  return ("2.11.0+", "2.14.1+");
+}
+
+#################################################################
+# Subroutine: ribo_DupfilterBlastnVersion()
+# Incept:     Sat Sep 26 2026
+#
+# Purpose:    Run 'blastn -version' and return the version it
+#             reports on its first line ('blastn: <version>').
+#
+# Arguments:
+#   $blastn:  path to the blastn executable
+#
+# Returns:    version string, e.g. "2.14.1+"
+#
+# Dies:       if blastn cannot be run, exits non-zero, or its
+#             first output line is not 'blastn: <version>'
+#
+#################################################################
+sub ribo_DupfilterBlastnVersion { 
+  my $sub_name = "ribo_DupfilterBlastnVersion";
+  my $nargs_expected = 1;
+  if(scalar(@_) != $nargs_expected) { printf STDERR ("ERROR, $sub_name entered with %d != %d input arguments.\n", scalar(@_), $nargs_expected); exit(1); } 
+
+  my ($blastn) = (@_);
+
+  my @out_A  = `"$blastn" -version 2>/dev/null`;
+  my $status = $?;
+  if($status != 0) { 
+    die sprintf("ERROR in $sub_name, '$blastn -version' failed (exit status %d)\n", ($status == -1) ? -1 : ($status >> 8));
+  }
+  my $first = (scalar(@out_A) > 0) ? $out_A[0] : "";
+  chomp $first;
+  if($first !~ m/^\s*blastn:\s+(\S+)\s*$/) { 
+    die "ERROR in $sub_name, could not read a version from the first line of '$blastn -version' output: '$first'\n";
+  }
+
+  return $1;
+}
+
+#################################################################
+# Subroutine: ribo_DupfilterNullMd5()
+# Incept:     Sat Sep 26 2026
+#
+# Purpose:    Return the md5 checksum of the *DuplicateRegion filter
+#             null threshold table file (ribo.dupfilter.null.tsv)
+#             that this version of Ribovore was released with.
+#             ribo_DupfilterNullLoad() refuses to read a table with
+#             any other checksum, so that every installation of the
+#             same version gives the same results.
+#
+# Arguments:  none
+#
+# Returns:    md5 checksum (32 lowercase hex characters)
+#
+#################################################################
+sub ribo_DupfilterNullMd5 { 
+  return "e2c834d4f140cc8960bb993337725bd8";
+}
+
+#################################################################
+# Subroutine: ribo_DupfilterFileMd5()
+# Incept:     Sat Sep 26 2026
+#
+# Purpose:    Return the md5 checksum of a file, computed with the
+#             core Perl module Digest::MD5.
+#
+# Arguments:
+#   $file:    path to the file
+#
+# Returns:    md5 checksum (32 lowercase hex characters)
+#
+# Dies:       if the file cannot be opened for reading
+#
+#################################################################
+sub ribo_DupfilterFileMd5 { 
+  my $sub_name = "ribo_DupfilterFileMd5";
+  my $nargs_expected = 1;
+  if(scalar(@_) != $nargs_expected) { printf STDERR ("ERROR, $sub_name entered with %d != %d input arguments.\n", scalar(@_), $nargs_expected); exit(1); } 
+
+  my ($file) = (@_);
+
+  require Digest::MD5;
+  my $in_FH = undef;
+  open($in_FH, "<", $file) || die "ERROR in $sub_name, unable to open $file for reading\n";
+  binmode($in_FH);
+  my $md5 = Digest::MD5->new->addfile($in_FH)->hexdigest;
+  close($in_FH);
+
+  return $md5;
+}
+
+#################################################################
+# Subroutine: ribo_DupfilterNullLoad()
+# Incept:     Thu Sep 25 2026
+#
+# Purpose:    Read and validate the *DuplicateRegion filter null
+#             threshold table file (ribo.dupfilter.null.tsv). The
+#             '#' header must give 'blastn_params', 'len_grid',
+#             'at_grid' and 'max_ratio' (as '# <key>: <value>'),
+#             and every other non-'#' line is a cell:
+#             <lq> <ls> <at_bin> <t05> (tab-separated).
+#
+#             The file's md5 checksum must equal
+#             ribo_DupfilterNullMd5().
+#
+#             Validation: the header grids parse and are strictly
+#             increasing; max_ratio is a positive integer; the
+#             header's blastn parameters equal
+#             ribo_DupfilterBlastnParams(); every t05 is a number;
+#             there are no duplicate cells; and every cell that
+#             ribo_DupfilterNullLookupCell() can return exists,
+#             with no other cells.
+#
+# Arguments:
+#   $null_file: path to the table file
+#
+# Returns:    reference to a hash with keys:
+#             "len_grid":  ref to array of length grid values
+#             "at_grid":   ref to array of AT grid values
+#             "max_ratio": maximum ratio of longer to shorter length
+#             "t05":       ref to hash, key "<lq>:<ls>:<at_bin>", value t05
+#             "header":    ref to hash of all '# <key>: <value>' header values
+#             "ncell":     number of cells
+#
+# Dies:       if the file cannot be read, has the wrong md5 checksum,
+#             or fails any validation check. The caller (ribotyper)
+#             catches this and exits with an error.
+#
+#################################################################
+sub ribo_DupfilterNullLoad { 
+  my $sub_name = "ribo_DupfilterNullLoad";
+  my $nargs_expected = 1;
+  if(scalar(@_) != $nargs_expected) { printf STDERR ("ERROR, $sub_name entered with %d != %d input arguments.\n", scalar(@_), $nargs_expected); exit(1); } 
+
+  my ($null_file) = (@_);
+
+  # the table must be exactly the one this version of Ribovore was released with
+  my $md5_expected = ribo_DupfilterNullMd5();
+  my $md5_found    = ribo_DupfilterFileMd5($null_file);
+  if($md5_found ne $md5_expected) { 
+    die "ERROR in $sub_name, $null_file is not the table this version of Ribovore was released with (md5 expected $md5_expected, found $md5_found)\n";
+  }
+
+  my %header_H = ();
+  my %t05_H    = ();
+  my $in_FH = undef;
+  open($in_FH, "<", $null_file) || die "ERROR in $sub_name, unable to open $null_file for reading\n";
+  my $line_ct = 0;
+  while(my $line = <$in_FH>) { 
+    $line_ct++;
+    chomp $line;
+    if($line =~ m/^\#/) { 
+      if($line =~ m/^\#\s*(\w+)\:\s*(.*\S)\s*$/) { 
+        $header_H{$1} = $2;
+      }
+    }
+    elsif($line =~ m/\S/) { 
+      my @el_A = split(/\t/, $line);
+      if(scalar(@el_A) != 4) { die "ERROR in $sub_name, line $line_ct of $null_file does not have 4 tab-separated fields\n"; }
+      my ($lq, $ls, $at, $t05) = (@el_A);
+      if(($t05 !~ m/^\-?\d+(\.\d*)?([eE][\+\-]?\d+)?$/) || ($lq !~ m/^\d+$/) || ($ls !~ m/^\d+$/)) { 
+        die "ERROR in $sub_name, line $line_ct of $null_file is not <lq> <ls> <at_bin> <t05>\n";
+      }
+      my $key = $lq . ":" . $ls . ":" . $at;
+      if(exists $t05_H{$key}) { die "ERROR in $sub_name, cell $key occurs more than once in $null_file\n"; }
+      $t05_H{$key} = $t05 + 0; # store as a number, so e.g. '41.0' is output as '41'
+    }
+  }
+  close($in_FH);
+
+  foreach my $key ("blastn_params", "len_grid", "at_grid", "max_ratio") { 
+    if(! defined $header_H{$key}) { die "ERROR in $sub_name, header line '# $key: <value>' missing from $null_file\n"; }
+  }
+  my %null_H = ("header" => \%header_H, "t05" => \%t05_H, "ncell" => scalar(keys %t05_H));
+  foreach my $key ("len_grid", "at_grid") { 
+    my @grid_A = split(/\s+/, $header_H{$key});
+    for(my $i = 0; $i < scalar(@grid_A); $i++) { 
+      if($grid_A[$i] !~ m/^\d+(\.\d+)?$/) { die "ERROR in $sub_name, $key value $grid_A[$i] in $null_file is not a number\n"; }
+      if(($i > 0) && ($grid_A[$i] <= $grid_A[($i-1)])) { die "ERROR in $sub_name, $key in $null_file is not strictly increasing\n"; }
+    }
+    if(scalar(@grid_A) == 0) { die "ERROR in $sub_name, $key in $null_file is empty\n"; }
+    $null_H{$key} = \@grid_A;
+  }
+  if(($header_H{"max_ratio"} !~ m/^\d+$/) || ($header_H{"max_ratio"} < 1)) { die "ERROR in $sub_name, max_ratio in $null_file is not a positive integer\n"; }
+  $null_H{"max_ratio"} = $header_H{"max_ratio"};
+  ribo_DupfilterAssertBlastnParams(\%null_H, ribo_DupfilterBlastnParams());
+
+  # every cell a lookup can reach must exist, and no other cell may exist
+  my $nreachable = 0;
+  foreach my $sb (@{$null_H{"len_grid"}}) { 
+    my $qmin = ribo_DupfilterRoundUp($sb / $null_H{"max_ratio"}, $null_H{"len_grid"});
+    foreach my $qb (@{$null_H{"len_grid"}}) { 
+      if(($qb >= $qmin) && ($qb <= $sb)) { 
+        foreach my $fb (@{$null_H{"at_grid"}}) { 
+          if($fb >= 0.5) { 
+            my $key = $qb . ":" . $sb . ":" . $fb;
+            if(! exists $t05_H{$key}) { die "ERROR in $sub_name, cell $key is missing from $null_file\n"; }
+            $nreachable++;
+          }
+        }
+      }
+    }
+  }
+  if($nreachable != $null_H{"ncell"}) { 
+    die sprintf("ERROR in $sub_name, $null_file has %d cells but %d are reachable by lookup\n", $null_H{"ncell"}, $nreachable);
+  }
+
+  return \%null_H;
+}
+
+#################################################################
+# Subroutine: ribo_DupfilterAssertBlastnParams()
+# Incept:     Thu Sep 25 2026
+#
+# Purpose:    Check that a blastn parameter string is the one the
+#             null threshold table was built with, ignoring
+#             differences in whitespace.
+#
+# Arguments:
+#   $null_HR: ref to null table hash from ribo_DupfilterNullLoad()
+#   $live:    blastn parameter string that will be used
+#
+# Returns:    '1'
+#
+# Dies:       if the parameter strings differ
+#
+#################################################################
+sub ribo_DupfilterAssertBlastnParams { 
+  my $sub_name = "ribo_DupfilterAssertBlastnParams";
+  my $nargs_expected = 2;
+  if(scalar(@_) != $nargs_expected) { printf STDERR ("ERROR, $sub_name entered with %d != %d input arguments.\n", scalar(@_), $nargs_expected); exit(1); } 
+
+  my ($null_HR, $live) = (@_);
+
+  my $table = $null_HR->{"header"}{"blastn_params"};
+  my $norm_table = join(" ", split(/\s+/, ($table =~ s/^\s+|\s+$//gr)));
+  my $norm_live  = join(" ", split(/\s+/, ($live  =~ s/^\s+|\s+$//gr)));
+  if($norm_table ne $norm_live) { 
+    die "ERROR in $sub_name, blastn parameters do not match the null table\n  table built with: $table\n  live invocation : $live\n";
+  }
+
+  return 1;
+}
+
+#################################################################
+# Subroutine: ribo_DupfilterOrientPair()
+# Incept:     Thu Sep 25 2026
+#
+# Purpose:    Order two sequences as (blastn query, blastn subject):
+#             the shorter one is the query, the orientation the null
+#             table was built in. Ties keep the input order.
+#
+# Arguments:
+#   $seqA: first sequence
+#   $seqB: second sequence
+#
+# Returns:    two values: query sequence, subject sequence
+#
+#################################################################
+sub ribo_DupfilterOrientPair { 
+  my $sub_name = "ribo_DupfilterOrientPair";
+  my $nargs_expected = 2;
+  if(scalar(@_) != $nargs_expected) { printf STDERR ("ERROR, $sub_name entered with %d != %d input arguments.\n", scalar(@_), $nargs_expected); exit(1); } 
+
+  my ($seqA, $seqB) = (@_);
+
+  return (length($seqB) < length($seqA)) ? ($seqB, $seqA) : ($seqA, $seqB);
+}
+
+#################################################################
+# Subroutine: ribo_DupfilterRoundUp()
+# Incept:     Thu Sep 25 2026
+#
+# Purpose:    Return the smallest grid value >= $x (with a 1e-9
+#             tolerance), or undef if $x is above the largest.
+#
+# Arguments:
+#   $x:       value to round up
+#   $grid_AR: ref to array of grid values, increasing
+#
+# Returns:    grid value or undef
+#
+#################################################################
+sub ribo_DupfilterRoundUp { 
+  my $sub_name = "ribo_DupfilterRoundUp";
+  my $nargs_expected = 2;
+  if(scalar(@_) != $nargs_expected) { printf STDERR ("ERROR, $sub_name entered with %d != %d input arguments.\n", scalar(@_), $nargs_expected); exit(1); } 
+
+  my ($x, $grid_AR) = (@_);
+
+  foreach my $g (@{$grid_AR}) { 
+    if($g >= ($x - 1e-9)) { return $g; }
+  }
+
+  return undef;
+}
+
+#################################################################
+# Subroutine: ribo_DupfilterNullLookupCell()
+# Incept:     Thu Sep 25 2026
+#
+# Purpose:    Find the null table cell for two extracts: the shorter
+#             and longer lengths and the composition skew
+#             max(AT, 1-AT) are each rounded UP to the next grid
+#             value, and the shorter length is raised further if
+#             needed so that the longer is at most max_ratio times
+#             the shorter (lengths below the smallest grid value map
+#             to it). Rounding up is conservative: it can only raise
+#             the threshold.
+#
+# Arguments:
+#   $null_HR: ref to null table hash from ribo_DupfilterNullLoad()
+#   $lenA:    length of first extract
+#   $lenB:    length of second extract
+#   $at:      AT fraction of the two extracts together
+#
+# Returns:    cell key "<lq>:<ls>:<at_bin>", or two values (undef,
+#             <reason>) if not covered: "LENGTH_ABOVE_GRID" if the
+#             longer extract is longer than the largest grid length,
+#             "AT_OUT_OF_RANGE" if the skew is above the largest AT
+#             grid value
+#
+#################################################################
+sub ribo_DupfilterNullLookupCell { 
+  my $sub_name = "ribo_DupfilterNullLookupCell";
+  my $nargs_expected = 4;
+  if(scalar(@_) != $nargs_expected) { printf STDERR ("ERROR, $sub_name entered with %d != %d input arguments.\n", scalar(@_), $nargs_expected); exit(1); } 
+
+  my ($null_HR, $lenA, $lenB, $at) = (@_);
+
+  my ($lq, $ls) = ($lenA <= $lenB) ? ($lenA, $lenB) : ($lenB, $lenA);
+  my $sb = ribo_DupfilterRoundUp($ls, $null_HR->{"len_grid"});
+  if(! defined $sb) { return (undef, "LENGTH_ABOVE_GRID"); }
+  my $qb   = ribo_DupfilterRoundUp($lq, $null_HR->{"len_grid"});
+  my $qmin = ribo_DupfilterRoundUp($sb / $null_HR->{"max_ratio"}, $null_HR->{"len_grid"});
+  if($qmin > $qb) { $qb = $qmin; }
+  my $f  = ($at >= 0.5) ? $at : 1 - $at;
+  my $fb = ribo_DupfilterRoundUp($f, $null_HR->{"at_grid"});
+  if(! defined $fb) { return (undef, "AT_OUT_OF_RANGE"); }
+
+  return ($qb . ":" . $sb . ":" . $fb);
+}
+
+#################################################################
+# Subroutine: ribo_DupfilterNullThreshold()
+# Incept:     Thu Sep 25 2026
+#
+# Purpose:    Return the alpha = 0.05 null score threshold for two
+#             extracts: a blastn maximum HSP bit score is significant
+#             if and only if it is greater than the threshold.
+#
+# Arguments:
+#   $null_HR: ref to null table hash from ribo_DupfilterNullLoad()
+#   $lenA:    length of first extract
+#   $lenB:    length of second extract
+#   $at:      AT fraction of the two extracts together
+#
+# Returns:    two values: threshold and cell key, or (undef, <reason>)
+#             if not covered (see ribo_DupfilterNullLookupCell())
+#
+# Dies:       if the cell is missing, which ribo_DupfilterNullLoad()
+#             rules out
+#
+#################################################################
+sub ribo_DupfilterNullThreshold { 
+  my $sub_name = "ribo_DupfilterNullThreshold";
+  my $nargs_expected = 4;
+  if(scalar(@_) != $nargs_expected) { printf STDERR ("ERROR, $sub_name entered with %d != %d input arguments.\n", scalar(@_), $nargs_expected); exit(1); } 
+
+  my ($null_HR, $lenA, $lenB, $at) = (@_);
+
+  my ($key, $why) = ribo_DupfilterNullLookupCell($null_HR, $lenA, $lenB, $at);
+  if(! defined $key) { return (undef, $why); }
+  if(! exists $null_HR->{"t05"}{$key}) { die "ERROR in $sub_name, internal error, no null table cell $key\n"; }
+
+  return ($null_HR->{"t05"}{$key}, $key);
+}
+
+#################################################################
+# Subroutine: ribo_DupfilterIsSignificant()
+# Incept:     Thu Sep 25 2026
+#
+# Purpose:    Decide if a blastn maximum HSP bit score for two
+#             extracts is significant at alpha = 0.05.
+#
+# Arguments:
+#   $null_HR: ref to null table hash from ribo_DupfilterNullLoad()
+#   $bits:    maximum HSP bit score (0 if no HSP)
+#   $lenA:    length of first extract
+#   $lenB:    length of second extract
+#   $at:      AT fraction of the two extracts together
+#
+# Returns:    two values: '1' or '0' and the cell key, or
+#             (undef, <reason>) if not covered
+#
+#################################################################
+sub ribo_DupfilterIsSignificant { 
+  my $sub_name = "ribo_DupfilterIsSignificant";
+  my $nargs_expected = 5;
+  if(scalar(@_) != $nargs_expected) { printf STDERR ("ERROR, $sub_name entered with %d != %d input arguments.\n", scalar(@_), $nargs_expected); exit(1); } 
+
+  my ($null_HR, $bits, $lenA, $lenB, $at) = (@_);
+
+  my ($thresh, $key) = ribo_DupfilterNullThreshold($null_HR, $lenA, $lenB, $at);
+  if(! defined $thresh) { return (undef, $key); }
+
+  return ((($bits > $thresh) ? 1 : 0), $key);
 }
 
 ###########################################################################

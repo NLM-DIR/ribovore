@@ -1,0 +1,69 @@
+#                                                                                                                        best-scoring model                                                                      different domain's best-scoring model   
+#                                                                      -----------------------------------------------------------------------------------------------------------------------                  ---------------------------------------  
+#idx  target      p/f  length  #fm  fam  domain                        model                            strnd  #ht  tscore  bscore  s/nt   bevalue   tcov   bcov   bfrom     bto  mfrom    mto  scdiff  scd/nt  model                            tscore  unexpected_features
+#---  ---------  ----  ------  ---  ---  ----------------------------  -------------------------------  -----  ---  ------  ------  ----  --------  -----  -----  ------  ------  -----  -----  ------  ------  -------------------------------  ------  -------------------
+1     NC_021406  PASS    1746    1  LSU  Mito-Bilateria                LSU_rRNA_mito_bilateria          plus     2   321.1   276.0  0.18   1.7e-85  0.838  0.513     838    1733    451   1273    71.1   0.041  LSU_rRNA_mito_arthropoda          553.7  LowScore:(0.18<0.50);LowCoverage:(0.838<0.860);MultipleHits:(2:SI[M:-166(451..616),S:90(748..837)]);LowScoreDifference:(0.041<0.100_bits_per_posn);
+2     NC_013821  FAIL     959    1  LSU  Mito-Nematoda                 LSU_rRNA_mito_nematoda           plus     2   533.0   384.3  0.56  4.1e-118  0.984  0.527     441     945    451    954   580.7   0.606  LSU_rRNA_mito_arthropoda          143.3  *DuplicateRegion:(451-471)_hits_1_and_2(M:451.954,37.471,S:441.945,2.440);MultipleHits:(2:SI[M:-21(451..471),S:0(440..441)]);
+#
+# Explanation of columns:
+#
+# Column  1 [idx]:                 index of sequence in input sequence file
+# Column  2 [target]:              name of target sequence
+# Column  3 [p/f]:                 PASS or FAIL (reasons for failure begin with '*' in rightmost column)
+# Column  4 [length]:              length of target sequence (nt)
+# Column  5 [#fm]:                 number of different families detected in sequence
+# Column  6 [fam]:                 name of family the best-scoring model to this sequence belongs to
+# Column  7 [domain]:              name of domain the best-scoring model to this sequence belongs to
+# Column  8 [model]:               name of best-scoring model
+# Column  9 [strnd]:               strand ('plus' or 'minus') of best-scoring hit
+# Column 10 [#ht]:                 number of hits to best model on strand of best hit (no score threshold enforced)
+# Column 11 [tscore]:              summed bit scores of all hits between best model and this sequence (no score threshold enforced)
+# Column 12 [bscore]:              bit score of best-scoring hit between best model and this sequence (above threshold)
+# Column 13 [s/nt]:                summed bit scores of all hits divided by length of the sequence
+# Column 14 [bevalue]:             E-value of best-scoring hit to this sequence
+# Column 15 [tcov]:                fraction of target sequence included in all (non-overlapping) hits to the best-scoring model
+# Column 16 [bcov]:                fraction of target sequence included in single best-scoring hit
+# Column 17 [bfrom]:               start position in the sequence of best-scoring hit
+# Column 18 [bto]:                 stop position in the sequence of best-scoring hit
+# Column 19 [mfrom]:               start position in the model of best-scoring hit
+# Column 20 [mto]:                 stop position in the model of best-scoring hit
+# Column 21 [scdiff]:              difference in score from classification stage between summed score of hits to best model and summed scores of hits to second best model
+# Column 22 [scd/nt]:              score difference per position: 'scdiff' value divided by total length of all hits to best model
+# Column 23 [model]:               name of second best-scoring model
+# Column 24 [tscore]:              summed bit scores of all hits between second-best model and this sequence (no score threshold enforced)
+# Column 25 [unexpected_features]: unexpected/unusual features of sequence (see below)
+# - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - - 
+#
+# Explanation of possible values in unexpected_features column:
+#
+# This column will include a '-' if none of the features listed below are detected.
+# Or it will contain one or more of the following types of messages. There are no
+# whitespaces in this field, to make parsing easier.
+#
+# Values that begin with "*" automatically cause a sequence to FAIL.
+# Values that do not begin with "*" do not cause a sequence to FAIL.
+#
+#  1.  *NoHits                 No primary hits to any models above the minimum primary score
+#                              threshold of 20 bits (--minpsc) were found.
+#  2.  *MultipleFamilies       One or more primary hits to two or more "families" (e.g. SSU
+#                              or LSU) exists for the same sequence.
+#  3.  *BothStrands            One or more primary hits above the minimum primary score threshold
+#                              of 20 bits (--minpsc) were found on each strand.
+#  4.  *DuplicateRegion        At least two hits (primary or secondary) on the same strand overlap
+#                              in model coordinates by 20 (--maxoverlap) positions or more
+#  5.  *InconsistentHits       Not all hits (primary or secondary) are in the same order in the
+#                              sequence and in the model.
+#  6.  MinusStrand             Best hit is on the minus strand.
+#  7.  LowScore                The bits per nucleotide (total bit score divided by total length
+#                              of sequence) is below threshold of 0.5 (--lowppossc).
+#  8.  LowCoverage             The total coverage of all hits (primary and secondary) to the best
+#                              model (summed length of all hits divided by total length of sequence)
+#                              is below threshold of 0.86 (--tcov).
+#  9.  LowScoreDifference      The difference between the top two domains is below the 'low'
+#                              threshold of 0.10 (--lowpdiff) bits per position (total bit score
+#                              divided by summed length of all hits).
+# 10.  VeryLowScoreDifference  The difference between the top two domains is below the 'very low'
+#                              threshold of 0.04 (--vlowpdiff) bits per position (total bit score
+#                              divided by summed length of all hits).
+# 11.  MultipleHits            There is more than one hit to the best scoring model on the same strand.
+#
