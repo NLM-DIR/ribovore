@@ -1,6 +1,6 @@
 # Ribovore <a name="top"></a>
 #### Version 1.0.5; September 2023
-#### https://github.com/ncbi/ribovore.git
+#### https://github.com/NLM-DIR/ribovore.git
 
 Ribovore is a suite of tools for detecting, classifying and analyzing
 small subunit ribosomal RNA (SSU rRNA) and large subunit (LSU) rRNA

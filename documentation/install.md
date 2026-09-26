@@ -11,12 +11,12 @@ The file `install.sh` is an executable file for installing Ribovore
 and its dependencies. That file is located online at github.
 To install the latest version of Ribovore download this file:
 
-https://raw.githubusercontent.com/ncbi/ribovore/master/install.sh
+https://raw.githubusercontent.com/NLM-DIR/ribovore/master/install.sh
 
 To download any specific release/version, for example version 1.0 download
 the corresponding `install.sh` file for that release/version.
 
-https://raw.githubusercontent.com/ncbi/ribovore/1.0/install.sh
+https://raw.githubusercontent.com/NLM-DIR/ribovore/1.0/install.sh
 
 Copy the `install.sh` file into the directory in which you want
 to install Ribovore. A good name for that directory is
