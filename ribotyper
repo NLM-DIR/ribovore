@@ -1134,9 +1134,8 @@ if(! opt_Get("--nodupfilter", \%opt_HH)) {
     }
     $dupfilter_secs += ofile_SecondsSinceEpoch() - $dupfilter_start;
     $dupfilter_tmp_root = $out_root . ".dupfilter.tmp";
-    printf $dupfilter_FH ("# blastn: %s\n# blastn parameters: %s\n# null table: %s, config %s, built %s, %s null pairs per cell; alpha 0.05\n",
+    printf $dupfilter_FH ("# blastn: %s\n# blastn parameters: %s\n# null table: %s, built %s, %s null pairs per cell; alpha 0.05\n",
                           $execs_H{"blastn"}, ribo_DupfilterBlastnParams(), $dupfilter_null_file, 
-                          $dupfilter_null_HR->{"header"}{"config"}          // "?", 
                           $dupfilter_null_HR->{"header"}{"built"}           // "?", 
                           $dupfilter_null_HR->{"header"}{"trials_per_cell"} // "?");
     print $dupfilter_FH "# one line per pair of hits that triggered *DuplicateRegion; a sequence's alert is removed only if EVERY pair is 'not_significant'\n";

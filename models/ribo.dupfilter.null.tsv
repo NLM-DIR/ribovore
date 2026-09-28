@@ -10,8 +10,8 @@
 # score (0 if there is no HSP). t05 is the threshold T such that an observed score
 # x is significant at alpha = 0.05 if and only if x > T, where
 # p = (number of null scores >= x, plus 1) / (N + 1).
-# Each cell's random number generator (Python random.Random) was seeded with the
-# first 12 hex digits of the md5 of the string '218dense:<lq>:<ls>:<at_bin>'.
+# Each cell's random number generator (Python random.Random) was seeded with a
+# fixed pseudo-random seed derived from the cell coordinates (lq, ls, at_bin).
 # The table was built with blastn 2.11.0+.
 #
 # Lookup (see ribo_DupfilterNullLookupCell()): lq and ls are the shorter and longer
@@ -19,7 +19,6 @@
 # rounded UP to the next grid value, and lq is raised further if needed so that
 # ls <= max_ratio * lq. Extracts longer than the largest grid length are not covered.
 #
-# config: C0_BASELINE
 # built: Thu Sep 24 15:06:00 2026
 # trials_per_cell: 500
 # alpha: 0.05
