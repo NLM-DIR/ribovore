@@ -16,7 +16,7 @@ https://raw.githubusercontent.com/NLM-DIR/ribovore/master/install.sh
 To download any specific release/version, for example version 1.0 download
 the corresponding `install.sh` file for that release/version.
 
-https://raw.githubusercontent.com/NLM-DIR/ribovore/1.0/install.sh
+https://raw.githubusercontent.com/NLM-DIR/ribovore/ribovore-1.0/install.sh
 
 Copy the `install.sh` file into the directory in which you want
 to install Ribovore. A good name for that directory is

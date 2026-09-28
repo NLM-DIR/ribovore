@@ -715,7 +715,7 @@ my $local_ra_modelinfo_file = $out_root . ".ra.modelinfo"; # model info file for
 
 if($do_fribo1 || $do_fribo2) { 
   # make sure that the model specified with --model exists
-  ribo_ParseRAModelinfoFile($ra_modelinfo_file, $df_model_dir, \@tmp_family_order_A, \%tmp_family_modelfile_H, \%tmp_family_modellen_H, \%tmp_family_rtname_HA, $ofile_info_HH{"FH"});
+  ribo_ParseRAModelinfoFile($ra_modelinfo_file, $df_model_dir, \@tmp_family_order_A, \%tmp_family_modelfile_H, \%tmp_family_modellen_H, \%tmp_family_rtname_HA, 0, $ofile_info_HH{"FH"}); # 0: model files are looked for only in the default model directory
   $family = opt_Get("--model", \%opt_HH);
   if(! exists $tmp_family_modelfile_H{$family}) { 
     foreach my $tmp_family (@tmp_family_order_A) { $family_fail_str .= $tmp_family. "\n"; }
