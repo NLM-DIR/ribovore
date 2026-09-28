@@ -119,6 +119,7 @@ foreach my $test_HR (@test_AH) {
   my $stderr = `cat $out.stderr`;
   like($stderr, $test_HR->{"errmsg"},         $test_HR->{"desc"} . ": error message says what is wrong");
   like($stderr, qr/use the --nodupfilter option/, $test_HR->{"desc"} . ": error message gives --nodupfilter");
+  like($stderr, qr/riboaligner: put --nodupfilter in the --riboopts file; ribodbmaker: put it in the --riboopts1 file; ribosensor has no way to pass it/, $test_HR->{"desc"} . ": error message gives the per-tool note");
   my $log = `cat $out/$out.ribotyper.log`;
   like($log, $test_HR->{"errmsg"}, $test_HR->{"desc"} . ": error message is in the .log file");
   # every command ribotyper runs is listed in its .cmd file
