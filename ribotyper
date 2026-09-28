@@ -5457,7 +5457,8 @@ sub dupfilter_env_fail {
              "  $problem\n" . 
              "To fix this, $fix.\n" . 
              "To run without the *DuplicateRegion filter instead, use the --nodupfilter option\n" . 
-             "(results will then differ from a default run: every *DuplicateRegion alert is FATAL).\n", 1, $FH_HR);
+             "(results will then differ from a default run: every *DuplicateRegion alert is FATAL).\n" . 
+             "(ribotyper: --nodupfilter; riboaligner: put --nodupfilter in the --riboopts file; ribodbmaker: put it in the --riboopts1 file; ribosensor has no way to pass it, so fix the installation)\n", 1, $FH_HR);
 
   return; # never reached
 }
